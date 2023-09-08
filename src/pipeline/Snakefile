@@ -1,0 +1,159 @@
+##### Snakemake file adapted from Nikos Mynhier's scRNAseq pipeline
+
+###############
+### IMPORTS ###
+###############
+
+import snakemake, os
+import pandas as pd
+
+#####################
+### CONFIGURATION ###
+#####################
+
+configfile: "./Config.yaml"
+snake_dir = config["snake_dir"]
+out_dir = config["out_dir"]
+data_dir = config["data_dir"]
+ref_dir = config["ref_dir"]
+
+os.chdir(config["out_dir"]) #change the working directory to the outdir from config
+
+########################
+### GLOBAL CONSTANTS ###
+########################
+
+#Threads from config
+DEFAULT_THREADS = int(config["DEFAULT_THREADS"])
+MAX_THREADS = int(config["MAX_THREADS"])
+
+#Chromosome Intervals
+chrom_intervals = [f'-L chr{i}' for i in list(range(1,23)) + ['X','Y','M']]
+
+###############
+### SAMPLES ###
+###############
+
+#Read in scRNAseq samples
+scRNAseq_samples = open(config["scRNAseq_samples"], "r")
+samples = scRNAseq_samples.readlines()
+samples = [s.strip() for s in samples]
+
+########################
+### INPUT-ONLY RULES ###
+########################
+
+rule all:
+    input:
+        expand("{out_dir}/RSEM/{samples}.genes.results", out_dir=out_dir, samples=samples)
+
+#######################
+### GENOME INDEXING ###
+#######################
+
+# Generate genome index for STAR alignment
+rule generate_STAR_index:
+    input:
+        fasta = config["ref_fasta"], 
+        gtf = config["ref_gtf"] 
+    output:
+        ref_index_dir = f"{ref_dir}/ref_index/STAR/SAIndex/SAindex"
+    params:
+        runMode = "genomeGenerate",
+        overhang = config["read_length"] - 1
+    threads: MAX_THREADS
+    shell:
+        "STAR --genomeFastaFiles {input.fasta} --sjdbGTFfile {input.gtf} "
+        "--runThreadN {threads} --runMode {params.runMode} --sjdbOverhang {params.overhang} "
+        "--genomeDir {output.ref_index_dir} "
+        
+# Generate genome index for RSEM
+rule generate_RSEM_index:
+    input:
+        fasta = config["ref_fasta"],
+        gtf = config["ref_gtf"]
+    output:
+        transcriptome_dir = f"{ref_dir}/ref_index/RSEM/hg38.grp"
+    params:
+        transcriptome_name = f"{ref_dir}/ref_index/RSEM/hg38", 
+    threads: MAX_THREADS
+    shell:
+        "rsem-prepare-reference -gtf {input.gtf} -p {threads} --star {input.fasta} {params.transcriptome_name} "
+        
+#################
+### ALIGNMENT ###
+#################
+
+#mapping, aligning, tagging and sorting step
+rule STAR_alignment:
+    input:
+        R1 = "%s/%s_R1.fastq.gz" % (data_dir, "{samples}"),         
+        R2 = "%s/%s_R2.fastq.gz" % (data_dir, "{samples}"),
+        star_ref =  f"{ref_dir}/ref_index/STAR/SAIndex/SAindex",
+        gtf = config["ref_gtf"]
+    output:
+        sorted_to_coord = "{out_dir}/STAR/{samples}.Aligned.sortedByCoord.out.bam",
+        to_transcriptome = "{out_dir}/STAR/{samples}.Aligned.toTranscriptome.out.bam"
+    params:
+        prefix = "{out_dir}/STAR/{samples}.",
+        sample = "{samples}"
+    shell:
+        """
+        STAR \
+        --runMode alignReads \
+        --runThreadN 1 \
+        --genomeDir {input.star_ref} \
+        --sjdbGTFfile {input.gtf} \
+        --twopassMode Basic \
+        --alignSJDBoverhangMin 2 \
+        --outFilterMismatchNoverLmax 0.1 \
+        --outFilterType BySJout \
+        --outFilterScoreMinOverLread 0.33 \
+        --outFilterMatchNminOverLread 0.33 \
+        --limitSjdbInsertNsj 1200000 \
+        --limitBAMsortRAM 171798691840 \
+        --readFilesIn {input.R1} {input.R2} \
+        --readFilesCommand zcat \
+        --outFileNamePrefix {params.prefix} \
+        --outSAMstrandField intronMotif \
+        --outFilterIntronMotifs None \
+        --alignSoftClipAtReferenceEnds No \
+        --quantMode TranscriptomeSAM GeneCounts \
+        --outSAMtype BAM SortedByCoordinate \
+        --outSAMunmapped Within \
+        --genomeLoad NoSharedMemory \
+        --chimSegmentMin 15 \
+        --chimJunctionOverhangMin 15 \
+        --outSAMattributes NH HI AS nM NM MD \
+        --outSAMattrRGline ID:{params.sample} SM:{params.sample} 
+        """
+        
+#######################
+### GENE EXPRESSION ###
+#######################
+
+# RSEM has specific requirements for BAM files, so we prep BAMs first
+rule rsem_prep_bam:
+    input:
+        bam = "{out_dir}/STAR/{samples}.Aligned.toTranscriptome.out.bam"
+    output:
+        rsem_bam = "{out_dir}/RSEM/{samples}.Aligned.toTranscriptome.rsem.out.bam"
+    params:
+        rsem_bam_name = "{out_dir}/RSEM/{samples}.Aligned.toTranscriptome.rsem.out"
+    shell:
+        "convert-sam-for-rsem {input.bam} {params.rsem_bam_name} --memory-per-thread 35G"
+
+# Using newly created RSEM-adapted BAM files, calculate expression values
+rule rsem_calc_expr:
+    input:
+        rsem_bam = "{out_dir}/STAR/{samples}.Aligned.toTranscriptome.out.bam",
+        transcriptome_dir = f"{ref_dir}/ref_index/RSEM/hg38.grp"
+    output:
+        rsem_gene = "{out_dir}/RSEM/{samples}.genes.results"
+    params:
+        ref_name = f"{ref_dir}/ref_index/RSEM/hg38",
+        sample_name = "{out_dir}/RSEM/{samples}",
+        options = "--paired-end --no-bam-output --estimate-rspd "
+    shell:
+        "rsem-calculate-expression {params.options} --alignments "
+        "{input.rsem_bam} {params.ref_name} {params.sample_name} "

@@ -1,0 +1,23 @@
+##################################################
+### Configfile for Snakefile-scRNA-seq in YAML ###
+##################################################
+
+# Fill in the full paths below
+
+### Directories ###
+out_dir: /.../SASP2023/data/ # where to store output data
+snake_dir: /.../SASP2023/src/pipeline/ # path to the snakemake file
+data_dir: /.../ # where the sequencing data is
+ref_dir: /.../ # where the reference genomes are
+
+### Samples ###
+scRNAseq_samples: /.../SASP2023/data/samples.txt # path to the sample file
+
+### Reference Genome ###
+ref_fasta: /.../ref_gen_pa.fa
+ref_gtf: /.../ref_gen.gtf
+read_length: 100
+
+### Thread Settings ###
+MAX_THREADS: 16
+DEFAULT_THREADS: 4
